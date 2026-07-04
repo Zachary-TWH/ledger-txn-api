@@ -1,0 +1,277 @@
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, field_validator
+from .database import SessionLocal
+from . import models
+from decimal import Decimal
+
+app = FastAPI()
+
+# This function gives each request its own database session, and closes it when done
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Pydantic schema: what a "create account" request must look like
+class AccountCreate(BaseModel):
+    owner_name: str
+    currency: str = "USD"
+
+# Pydantic schema: what we send back in the response
+class AccountOut(BaseModel):
+    id: int
+    owner_name: str
+    currency: str
+    balance: float
+
+    class Config:
+        from_attributes = True  # lets Pydantic read SQLAlchemy objects directly
+
+@app.post("/accounts", response_model=AccountOut)
+def create_account(account: AccountCreate, db: Session = Depends(get_db)):
+    new_account = models.Account(
+        owner_name=account.owner_name,
+        currency=account.currency,
+        balance=0
+    )
+    db.add(new_account)
+    db.commit()
+    db.refresh(new_account)
+    return new_account
+
+
+class DepositRequest(BaseModel):
+    account_id: int
+    amount: Decimal
+    idempotency_key: str
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v):
+        # v is the value of "amount" from the incoming JSON
+        # e.g. v = 100 (valid), v = -50 (invalid), v = 0 (invalid)
+        if v <= 0:
+            raise ValueError("Amount must be greater than zero")
+        return v
+
+# The EXTERNAL_ACCOUNT_ID is a constant representing the system's external account
+EXTERNAL_ACCOUNT_ID = 6
+
+@app.post("/deposit")
+def deposit(req: DepositRequest, db: Session = Depends(get_db)):
+    # idempotency check: has this exact request been processed before?
+    existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Duplicate request")
+
+    account = db.query(models.Account).filter_by(id=req.account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # create the transaction record
+    txn = models.Transaction(idempotency_key=req.idempotency_key, description="Deposit")
+    db.add(txn)
+    db.flush()  # gets txn.id without committing yet
+
+    # two ledger entries: debit EXTERNAL, credit the user's account
+    debit_entry = models.LedgerEntry(
+        transaction_id=txn.id,
+        account_id=EXTERNAL_ACCOUNT_ID,
+        entry_type=models.EntryType.DEBIT,
+        amount=req.amount
+    )
+    credit_entry = models.LedgerEntry(
+        transaction_id=txn.id,
+        account_id=account.id,
+        entry_type=models.EntryType.CREDIT,
+        amount=req.amount
+    )
+    db.add_all([debit_entry, credit_entry])
+
+    # update balances
+    account.balance += req.amount
+
+    db.commit()
+    db.refresh(account)
+    return {"transaction_id": txn.id, "new_balance": account.balance}
+
+class WithdrawalRequest(BaseModel):
+    account_id: int
+    amount: Decimal
+    idempotency_key: str
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v):
+        if v <= 0:
+            raise ValueError("Amount must be greater than zero")
+        return v
+
+@app.post("/withdraw")
+def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
+    # req.idempotency_key = "wdr-001" (from JSON)
+    # check if this exact request was already processed before
+    existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Duplicate request")
+
+    # req.account_id = 5 (from JSON) — fetch Alice's account row from Postgres
+    account = db.query(models.Account).filter_by(id=req.account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # account.balance = 100 (from Postgres), req.amount = 40 (from JSON)
+    # does Alice have enough money to withdraw?
+    if account.balance < req.amount:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+
+    # create one transaction record grouping the two ledger entries together
+    txn = models.Transaction(idempotency_key=req.idempotency_key, description="Withdrawal")
+    db.add(txn)
+    db.flush()  # get txn.id without committing yet
+
+    # debit Alice (money leaving her account)
+    debit_entry = models.LedgerEntry(
+        transaction_id=txn.id,
+        account_id=account.id,          # Alice = id 5
+        entry_type=models.EntryType.DEBIT,
+        amount=req.amount               # 40
+    )
+    # credit EXTERNAL (money leaving the system)
+    credit_entry = models.LedgerEntry(
+        transaction_id=txn.id,
+        account_id=EXTERNAL_ACCOUNT_ID, # EXTERNAL = id 6
+        entry_type=models.EntryType.CREDIT,
+        amount=req.amount               # 40
+    )
+    db.add_all([debit_entry, credit_entry])
+
+    # update Alice's balance: 100 - 40 = 60
+    account.balance -= req.amount
+
+    # commit everything together atomically — all or nothing
+    db.commit()
+    db.refresh(account)
+    return {"transaction_id": txn.id, "new_balance": account.balance}
+
+
+class TransferRequest(BaseModel):
+    from_account_id: int
+    to_account_id: int
+    amount: Decimal
+    idempotency_key: str
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v):
+        if v <= 0:
+            raise ValueError("Amount must be greater than zero")
+        return v
+
+@app.post("/transfer")
+def transfer(req: TransferRequest, db: Session = Depends(get_db)):
+    # check if this exact transfer was already processed before
+    # req.idempotency_key = "txn-001" (from JSON)
+    existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Duplicate request")
+
+    # fetch sender's account row from Postgres
+    # req.from_account_id = 5 (Alice)
+    from_account = db.query(models.Account).filter_by(id=req.from_account_id).first()
+    if not from_account:
+        raise HTTPException(status_code=404, detail="Sender account not found")
+
+    # fetch receiver's account row from Postgres
+    # req.to_account_id = 3 (Bob)
+    to_account = db.query(models.Account).filter_by(id=req.to_account_id).first()
+    if not to_account:
+        raise HTTPException(status_code=404, detail="Receiver account not found")
+    
+        
+    # prevent transferring to yourself
+    # req.from_account_id = 5, req.to_account_id = 5 → reject
+    if req.from_account_id == req.to_account_id:
+        raise HTTPException(status_code=400, detail="Cannot transfer to the same account")
+    
+        # prevent transferring between different currencies
+    # e.g. Alice is USD, Bob is SGD → reject
+    if from_account.currency != to_account.currency:
+        raise HTTPException(status_code=400, detail="Currency mismatch between accounts")
+
+    # does Alice have enough money to send?
+    # from_account.balance = 60 (from Postgres), req.amount = 20 (from JSON)
+    if from_account.balance < req.amount:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+
+    # create one transaction record grouping both ledger entries together
+    txn = models.Transaction(idempotency_key=req.idempotency_key, description="Transfer")
+    db.add(txn)
+    db.flush()  # get txn.id without committing yet
+
+    # debit Alice (money leaving her account)
+    debit_entry = models.LedgerEntry(
+        transaction_id=txn.id,
+        account_id=from_account.id,        # Alice = id 5
+        entry_type=models.EntryType.DEBIT,
+        amount=req.amount                  # 20
+    )
+    # credit Bob (money arriving in his account)
+    credit_entry = models.LedgerEntry(
+        transaction_id=txn.id,
+        account_id=to_account.id,          # Bob = id 3
+        entry_type=models.EntryType.CREDIT,
+        amount=req.amount                  # 20
+    )
+    db.add_all([debit_entry, credit_entry])
+
+    # update both balances: Alice 60 - 20 = 40, Bob whatever + 20
+    from_account.balance -= req.amount
+    to_account.balance += req.amount
+
+    # commit everything together — all or nothing
+    db.commit()
+    db.refresh(from_account)
+    db.refresh(to_account)
+    return {
+        "transaction_id": txn.id,
+        "from_account_new_balance": from_account.balance,
+        "to_account_new_balance": to_account.balance
+    }
+
+
+@app.get("/accounts/{account_id}")
+def get_account(account_id: int, db: Session = Depends(get_db)):
+    # account_id comes from the URL, not JSON body
+    # e.g. GET /accounts/5 → account_id = 5
+    account = db.query(models.Account).filter_by(id=account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return account
+
+
+@app.get("/accounts/{account_id}/transactions")
+def get_transactions(account_id: int, db: Session = Depends(get_db)):
+    # check account exists first
+    account = db.query(models.Account).filter_by(id=account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # fetch all ledger entries for this account
+    # each entry links to a transaction, so we can see the full history
+    entries = db.query(models.LedgerEntry).filter_by(account_id=account_id).all()
+
+    # shape the response — for each entry, return the relevant details
+    result = []
+    for entry in entries:
+        result.append({
+            "transaction_id": entry.transaction_id,
+            "entry_type": entry.entry_type,   # DEBIT or CREDIT
+            "amount": entry.amount,
+            "description": entry.transaction.description  # e.g. "Deposit", "Withdrawal", "Transfer"
+        })
+
+    return result
