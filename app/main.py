@@ -57,8 +57,6 @@ class DepositRequest(BaseModel):
             raise ValueError("Amount must be greater than zero")
         return v
 
-# The EXTERNAL_ACCOUNT_ID is a constant representing the system's external account
-EXTERNAL_ACCOUNT_ID = 6
 
 @app.post("/deposit")
 def deposit(req: DepositRequest, db: Session = Depends(get_db)):
@@ -66,6 +64,12 @@ def deposit(req: DepositRequest, db: Session = Depends(get_db)):
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
         raise HTTPException(status_code=409, detail="Duplicate request")
+    # find the EXTERNAL account dynamically instead of hardcoding its id
+    external = db.query(models.Account).filter_by(owner_name="EXTERNAL").first()
+    if not external:
+        raise HTTPException(status_code=500, detail="EXTERNAL account not configured")
+
+
 
     account = db.query(models.Account).filter_by(id=req.account_id).first()
     if not account:
@@ -79,7 +83,7 @@ def deposit(req: DepositRequest, db: Session = Depends(get_db)):
     # two ledger entries: debit EXTERNAL, credit the user's account
     debit_entry = models.LedgerEntry(
         transaction_id=txn.id,
-        account_id=EXTERNAL_ACCOUNT_ID,
+        account_id=external.id,  # EXTERNAL account
         entry_type=models.EntryType.DEBIT,
         amount=req.amount
     )
@@ -117,6 +121,13 @@ def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
         raise HTTPException(status_code=409, detail="Duplicate request")
+    
+
+        # find the EXTERNAL account dynamically instead of hardcoding its id
+    external = db.query(models.Account).filter_by(owner_name="EXTERNAL").first()
+    if not external:
+        raise HTTPException(status_code=500, detail="EXTERNAL account not configured")
+
 
     # req.account_id = 5 (from JSON) — fetch Alice's account row from Postgres
     account = db.query(models.Account).filter_by(id=req.account_id).first()
@@ -143,7 +154,7 @@ def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
     # credit EXTERNAL (money leaving the system)
     credit_entry = models.LedgerEntry(
         transaction_id=txn.id,
-        account_id=EXTERNAL_ACCOUNT_ID, # EXTERNAL = id 6
+        account_id=external.id,  # EXTERNAL account
         entry_type=models.EntryType.CREDIT,
         amount=req.amount               # 40
     )

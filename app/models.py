@@ -1,3 +1,5 @@
+# defines the structure of the tables as Python classes and blueprints for SQLAlchemy to use when creating the tables in Postgres
+
 from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, DateTime, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -23,7 +25,8 @@ class Transaction(Base):
     idempotency_key = Column(String, unique=True, index=True)
     description = Column(String)
     created_at = Column(DateTime, server_default=func.now())
-
+    notes = Column(String, nullable=True)
+    
     entries = relationship("LedgerEntry", back_populates="transaction")
 
 class LedgerEntry(Base):
