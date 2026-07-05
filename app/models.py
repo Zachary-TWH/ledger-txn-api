@@ -7,8 +7,8 @@ from .database import Base
 import enum
 
 class EntryType(str, enum.Enum):
-    DEBIT = "debit"
-    CREDIT = "credit"
+    DEBIT = "DEBIT"
+    CREDIT = "CREDIT"
 
 class Account(Base):
     __tablename__ = "accounts"
