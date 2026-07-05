@@ -4,6 +4,7 @@ from pydantic import BaseModel, field_validator
 from .database import SessionLocal
 from . import models
 from decimal import Decimal
+from sqlalchemy import func
 
 app = FastAPI()
 
@@ -289,3 +290,37 @@ def get_transactions(account_id: int, db: Session = Depends(get_db)):
         })
 
     return result
+
+@app.get("/accounts/{account_id}/integrity")
+def check_integrity(account_id: int, db: Session = Depends(get_db)):
+    # fetch the account
+    account = db.query(models.Account).filter_by(id=account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # sum all CREDIT entries for this account
+    # func.sum() is SQLAlchemy's way of running SUM() in SQL
+    total_credits = db.query(func.sum(models.LedgerEntry.amount)).filter(
+        models.LedgerEntry.account_id == account_id,
+        models.LedgerEntry.entry_type == models.EntryType.CREDIT
+    ).scalar() or Decimal(0)  # scalar() returns a single value, not a list
+                               # "or Decimal(0)" handles case where no entries exist yet
+
+    # sum all DEBIT entries for this account
+    total_debits = db.query(func.sum(models.LedgerEntry.amount)).filter(
+        models.LedgerEntry.account_id == account_id,
+        models.LedgerEntry.entry_type == models.EntryType.DEBIT
+    ).scalar() or Decimal(0)
+
+    # recompute balance from ledger entries
+    computed_balance = total_credits - total_debits
+
+    # compare against stored balance
+    is_valid = computed_balance == account.balance
+
+    return {
+        "account_id": account_id,
+        "stored_balance": account.balance,
+        "computed_balance": computed_balance,
+        "is_valid": is_valid  # True = balances match, False = discrepancy detected
+    }

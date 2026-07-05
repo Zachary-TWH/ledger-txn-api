@@ -4,11 +4,13 @@ from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, DateTime, E
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
+
 import enum
 
 class EntryType(str, enum.Enum):
     DEBIT = "DEBIT"
     CREDIT = "CREDIT"
+
 
 class Account(Base):
     __tablename__ = "accounts"
