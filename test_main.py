@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.database import Base
 from app.main import get_db
+import threading
 
 # Use a separate test database so tests don't touch your real data
 TEST_DATABASE_URL = "postgresql://postgres:mysecret@localhost:5432/ledger_test"
@@ -101,3 +102,26 @@ def test_transfer_same_account():
     })
     assert response.status_code == 400
     assert response.json()["detail"] == "Cannot transfer to the same account"
+
+def test_concurrent_deposits():
+    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}).json()
+    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"})
+
+    # two threads deposit 50 at the same time
+    def deposit():
+        client.post("/deposit", json={
+            "account_id": alice["id"],
+            "amount": 50,
+            "idempotency_key": f"dep-{threading.get_ident()}"  # unique key per thread
+        })
+
+    t1 = threading.Thread(target=deposit)
+    t2 = threading.Thread(target=deposit)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # both deposits should have landed — final balance must be 100, not 50
+    response = client.get(f"/accounts/{alice['id']}")
+    assert response.json()["balance"] == 100.0

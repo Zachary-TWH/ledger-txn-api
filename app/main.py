@@ -70,8 +70,8 @@ def deposit(req: DepositRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="EXTERNAL account not configured")
 
 
-
-    account = db.query(models.Account).filter_by(id=req.account_id).first()
+    # with_for_update() locks the row so no other transaction can modify it until we commit or rollback
+    account = db.query(models.Account).filter_by(id=req.account_id).with_for_update().first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
@@ -129,8 +129,8 @@ def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="EXTERNAL account not configured")
 
 
-    # req.account_id = 5 (from JSON) — fetch Alice's account row from Postgres
-    account = db.query(models.Account).filter_by(id=req.account_id).first()
+    # with_for_update() locks the row so no other transaction can modify it until we commit or rollback
+    account = db.query(models.Account).filter_by(id=req.account_id).with_for_update().first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
@@ -189,26 +189,29 @@ def transfer(req: TransferRequest, db: Session = Depends(get_db)):
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
         raise HTTPException(status_code=409, detail="Duplicate request")
-
-    # fetch sender's account row from Postgres
-    # req.from_account_id = 5 (Alice)
-    from_account = db.query(models.Account).filter_by(id=req.from_account_id).first()
-    if not from_account:
-        raise HTTPException(status_code=404, detail="Sender account not found")
-
-    # fetch receiver's account row from Postgres
-    # req.to_account_id = 3 (Bob)
-    to_account = db.query(models.Account).filter_by(id=req.to_account_id).first()
-    if not to_account:
-        raise HTTPException(status_code=404, detail="Receiver account not found")
     
-        
     # prevent transferring to yourself
     # req.from_account_id = 5, req.to_account_id = 5 → reject
     if req.from_account_id == req.to_account_id:
         raise HTTPException(status_code=400, detail="Cannot transfer to the same account")
+
+
+    # always lock in consistent id order to prevent deadlocks and assign the locks to variables for clarity
+    lock_first_id = min(req.from_account_id, req.to_account_id)
+    lock_second_id = max(req.from_account_id, req.to_account_id)
     
-        # prevent transferring between different currencies
+    # lock both rows in order — any other request touching these accounts must wait
+    first = db.query(models.Account).filter_by(id=lock_first_id).with_for_update().first()
+    second = db.query(models.Account).filter_by(id=lock_second_id).with_for_update().first()
+
+    if not first or not second:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # assign back to correct sender/receiver variables
+    from_account = first if first.id == req.from_account_id else second
+    to_account = second if second.id == req.to_account_id else first
+    
+    # prevent transferring between different currencies
     # e.g. Alice is USD, Bob is SGD → reject
     if from_account.currency != to_account.currency:
         raise HTTPException(status_code=400, detail="Currency mismatch between accounts")
