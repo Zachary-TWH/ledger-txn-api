@@ -227,7 +227,7 @@ def transfer(req: TransferRequest, db: Session = Depends(get_db)):
     db.add(txn)
     db.flush()  # get txn.id without committing yet
 
-    # debit Alice (money leaving her account)
+    # debit Alice (money leaving her account )
     debit_entry = models.LedgerEntry(
         transaction_id=txn.id,
         account_id=from_account.id,        # Alice = id 5
@@ -269,15 +269,23 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/accounts/{account_id}/transactions")
-def get_transactions(account_id: int, db: Session = Depends(get_db)):
+def get_transactions(account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20):
     # check account exists first
     account = db.query(models.Account).filter_by(id=account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
+    # calculate how many rows to skip
+    # page 1: skip 0, page 2: skip 20, page 3: skip 40
+    offset = (page - 1) * page_size
+
     # fetch all ledger entries for this account
     # each entry links to a transaction, so we can see the full history
-    entries = db.query(models.LedgerEntry).filter_by(account_id=account_id).all()
+    entries = db.query(models.LedgerEntry)\
+        .filter_by(account_id=account_id)\
+        .offset(offset)\
+        .limit(page_size)\
+        .all()
 
     # shape the response — for each entry, return the relevant details
     result = []
@@ -289,7 +297,11 @@ def get_transactions(account_id: int, db: Session = Depends(get_db)):
             "description": entry.transaction.description  # e.g. "Deposit", "Withdrawal", "Transfer"
         })
 
-    return result
+    return {
+        "page": page,
+        "page_size": page_size,
+        "results": result
+    }
 
 @app.get("/accounts/{account_id}/integrity")
 def check_integrity(account_id: int, db: Session = Depends(get_db)):
