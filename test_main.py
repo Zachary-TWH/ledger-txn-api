@@ -7,13 +7,11 @@ from app.database import Base
 from app.main import get_db
 import threading
 
-# Use a separate test database so tests don't touch your real data
 TEST_DATABASE_URL = "postgresql://postgres:mysecret@localhost:5432/ledger_test"
 
 engine = create_engine(TEST_DATABASE_URL)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Override the get_db dependency to use test database instead of production database
 def override_get_db():
     db = TestingSessionLocal()
     try:
@@ -23,97 +21,100 @@ def override_get_db():
 
 app.dependency_overrides[get_db] = override_get_db
 
-# TestClient wraps our FastAPI app — lets us make requests without running the server
 client = TestClient(app)
 
-# This runs before every test — creates fresh tables
-# After every test — drops them, so each test starts clean
 @pytest.fixture(autouse=True)
 def setup_database():
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
 
-# ── TESTS ──────────────────────────────────────────────────────────────────────
+def get_auth_headers():
+    client.post("/register", json={"username": "testuser", "password": "testpass123"})
+    response = client.post("/login", data={"username": "testuser", "password": "testpass123"})
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 
 def test_create_account():
-    response = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"})
+    headers = get_auth_headers()
+    response = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}, headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["owner_name"] == "Alice"
     assert data["balance"] == 0.0
 
-def test_deposit():     
-    # create account first
-    account = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}).json()
-    # create EXTERNAL account (required by deposit logic)
-    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"})
+def test_deposit():
+    headers = get_auth_headers()
+    account = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}, headers=headers).json()
+    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"}, headers=headers)
 
     response = client.post("/deposit", json={
         "account_id": account["id"],
         "amount": 100,
         "idempotency_key": "dep-001"
-    })
+    }, headers=headers)
     assert response.status_code == 200
     assert response.json()["new_balance"] == 100.0
 
 def test_withdraw_insufficient_funds():
-    account = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}).json()
-    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"})
+    headers = get_auth_headers()
+    account = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}, headers=headers).json()
+    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"}, headers=headers)
 
     response = client.post("/withdraw", json={
         "account_id": account["id"],
         "amount": 100,
         "idempotency_key": "wdr-001"
-    })
+    }, headers=headers)
     assert response.status_code == 400
     assert response.json()["detail"] == "Insufficient funds"
 
 def test_transfer():
-    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}).json()
-    bob = client.post("/accounts", json={"owner_name": "Bob", "currency": "USD"}).json()
-    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"})
+    headers = get_auth_headers()
+    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}, headers=headers).json()
+    bob = client.post("/accounts", json={"owner_name": "Bob", "currency": "USD"}, headers=headers).json()
+    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"}, headers=headers)
 
-    # deposit into alice first
     client.post("/deposit", json={
         "account_id": alice["id"],
         "amount": 100,
         "idempotency_key": "dep-001"
-    })
+    }, headers=headers)
 
     response = client.post("/transfer", json={
         "from_account_id": alice["id"],
         "to_account_id": bob["id"],
         "amount": 40,
         "idempotency_key": "txn-001"
-    })
+    }, headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["from_account_new_balance"] == 60.0
     assert data["to_account_new_balance"] == 40.0
 
 def test_transfer_same_account():
-    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}).json()
+    headers = get_auth_headers()
+    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}, headers=headers).json()
     response = client.post("/transfer", json={
         "from_account_id": alice["id"],
         "to_account_id": alice["id"],
         "amount": 10,
         "idempotency_key": "txn-002"
-    })
+    }, headers=headers)
     assert response.status_code == 400
     assert response.json()["detail"] == "Cannot transfer to the same account"
 
 def test_concurrent_deposits():
-    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}).json()
-    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"})
+    headers = get_auth_headers()
+    alice = client.post("/accounts", json={"owner_name": "Alice", "currency": "USD"}, headers=headers).json()
+    client.post("/accounts", json={"owner_name": "EXTERNAL", "currency": "USD"}, headers=headers)
 
-    # two threads deposit 50 at the same time
     def deposit():
         client.post("/deposit", json={
             "account_id": alice["id"],
             "amount": 50,
-            "idempotency_key": f"dep-{threading.get_ident()}"  # unique key per thread
-        })
+            "idempotency_key": f"dep-{threading.get_ident()}"
+        }, headers=headers)
 
     t1 = threading.Thread(target=deposit)
     t2 = threading.Thread(target=deposit)
@@ -122,6 +123,5 @@ def test_concurrent_deposits():
     t1.join()
     t2.join()
 
-    # both deposits should have landed — final balance must be 100, not 50
-    response = client.get(f"/accounts/{alice['id']}")
+    response = client.get(f"/accounts/{alice['id']}", headers=headers)
     assert response.json()["balance"] == 100.0
