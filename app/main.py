@@ -143,7 +143,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/deposit")
-def deposit(req: DepositRequest, db: Session = Depends(get_db)):
+def deposit(req: DepositRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # idempotency check: has this exact request been processed before?
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
@@ -187,7 +187,7 @@ def deposit(req: DepositRequest, db: Session = Depends(get_db)):
     return {"transaction_id": txn.id, "new_balance": account.balance}
 
 @app.post("/withdraw")
-def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
+def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # req.idempotency_key = "wdr-001" (from JSON)
     # check if this exact request was already processed before
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
@@ -241,7 +241,7 @@ def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
     return {"transaction_id": txn.id, "new_balance": account.balance}
 
 @app.post("/transfer")
-def transfer(req: TransferRequest, db: Session = Depends(get_db)):
+def transfer(req: TransferRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # check if this exact transfer was already processed before
     # req.idempotency_key = "txn-001" (from JSON)
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
@@ -315,7 +315,7 @@ def transfer(req: TransferRequest, db: Session = Depends(get_db)):
     }
 
 @app.get("/accounts/{account_id}")
-def get_account(account_id: int, db: Session = Depends(get_db)):
+def get_account(account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # account_id comes from the URL, not JSON body
     # e.g. GET /accounts/5 → account_id = 5
     account = db.query(models.Account).filter_by(id=account_id).first()
@@ -324,7 +324,7 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
     return account
 
 @app.get("/accounts/{account_id}/transactions")
-def get_transactions(account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20):
+def get_transactions(account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20, current_user: models.User = Depends(get_current_user)):
     # check account exists first
     account = db.query(models.Account).filter_by(id=account_id).first()
     if not account:
@@ -359,7 +359,7 @@ def get_transactions(account_id: int, db: Session = Depends(get_db), page : int 
     }
 
 @app.get("/accounts/{account_id}/integrity")
-def check_integrity(account_id: int, db: Session = Depends(get_db)):
+def check_integrity(account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # fetch the account
     account = db.query(models.Account).filter_by(id=account_id).first()
     if not account:
