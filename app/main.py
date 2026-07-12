@@ -10,7 +10,6 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 
-
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -43,18 +42,9 @@ class AccountOut(BaseModel):
     class Config:
         from_attributes = True  # lets Pydantic read SQLAlchemy objects directly
 
-@app.post("/accounts", response_model=AccountOut)
-def create_account(account: AccountCreate, db: Session = Depends(get_db)):
-    new_account = models.Account(
-        owner_name=account.owner_name,
-        currency=account.currency,
-        balance=0
-    )
-    db.add(new_account)
-    db.commit()
-    db.refresh(new_account)
-    return new_account
-
+class UserCreate(BaseModel):
+    username: str
+    password: str
 
 class DepositRequest(BaseModel):
     account_id: int
@@ -69,7 +59,88 @@ class DepositRequest(BaseModel):
         if v <= 0:
             raise ValueError("Amount must be greater than zero")
         return v
+    
+class WithdrawalRequest(BaseModel):
+    account_id: int
+    amount: Decimal
+    idempotency_key: str
 
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v):
+        if v <= 0:
+            raise ValueError("Amount must be greater than zero")
+        return v
+    
+class TransferRequest(BaseModel):
+    from_account_id: int
+    to_account_id: int
+    amount: Decimal
+    idempotency_key: str
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v):
+        if v <= 0:
+            raise ValueError("Amount must be greater than zero")
+        return v
+
+def hash_password(password: str) -> str:
+    # converts "mysecret" → "$2b$12$randomhashstring..."
+    return pwd_context.hash(password[:72])
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    # checks if "mysecret" matches the stored hash — returns True or False
+    return pwd_context.verify(plain_password[:72], hashed_password)
+
+def create_access_token(data: dict) -> str:
+    # data = {"sub": "alice"} — sub means "subject" (who this token is for)
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})  # add expiry time to token
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    # this runs on every protected endpoint — verifies the token
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(models.User).filter_by(username=username).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+@app.post("/register")
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    # check if username already exists
+    existing = db.query(models.User).filter_by(username=user.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    # hash the password before saving — never store plain text
+    new_user = models.User(
+        username=user.username,
+        hashed_password=hash_password(user.password)
+    )
+    db.add(new_user)
+    db.commit()
+    return {"message": "User created successfully"}
+
+@app.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    # OAuth2PasswordRequestForm expects username + password as form fields
+    user = db.query(models.User).filter_by(username=form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # create and return a JWT token
+    token = create_access_token(data={"sub": user.username})
+    return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/deposit")
 def deposit(req: DepositRequest, db: Session = Depends(get_db)):
@@ -114,18 +185,6 @@ def deposit(req: DepositRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(account)
     return {"transaction_id": txn.id, "new_balance": account.balance}
-
-class WithdrawalRequest(BaseModel):
-    account_id: int
-    amount: Decimal
-    idempotency_key: str
-
-    @field_validator("amount")
-    @classmethod
-    def amount_must_be_positive(cls, v):
-        if v <= 0:
-            raise ValueError("Amount must be greater than zero")
-        return v
 
 @app.post("/withdraw")
 def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
@@ -180,20 +239,6 @@ def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(account)
     return {"transaction_id": txn.id, "new_balance": account.balance}
-
-
-class TransferRequest(BaseModel):
-    from_account_id: int
-    to_account_id: int
-    amount: Decimal
-    idempotency_key: str
-
-    @field_validator("amount")
-    @classmethod
-    def amount_must_be_positive(cls, v):
-        if v <= 0:
-            raise ValueError("Amount must be greater than zero")
-        return v
 
 @app.post("/transfer")
 def transfer(req: TransferRequest, db: Session = Depends(get_db)):
@@ -269,7 +314,6 @@ def transfer(req: TransferRequest, db: Session = Depends(get_db)):
         "to_account_new_balance": to_account.balance
     }
 
-
 @app.get("/accounts/{account_id}")
 def get_account(account_id: int, db: Session = Depends(get_db)):
     # account_id comes from the URL, not JSON body
@@ -278,7 +322,6 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
     return account
-
 
 @app.get("/accounts/{account_id}/transactions")
 def get_transactions(account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20):
@@ -348,3 +391,15 @@ def check_integrity(account_id: int, db: Session = Depends(get_db)):
         "computed_balance": computed_balance,
         "is_valid": is_valid  # True = balances match, False = discrepancy detected
     }
+
+@app.post("/accounts", response_model=AccountOut)
+def create_account(account: AccountCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    new_account = models.Account(
+        owner_name=account.owner_name,
+        currency=account.currency,
+        balance=0
+    )
+    db.add(new_account)
+    db.commit()
+    db.refresh(new_account)
+    return new_account
