@@ -12,7 +12,9 @@ from datetime import datetime, timedelta
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from apscheduler.schedulers.background import BackgroundScheduler 
 from slowapi.middleware import SlowAPIMiddleware
+
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
@@ -27,6 +29,39 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+def reconcile_all_accounts():
+    db = SessionLocal()
+    try:
+        accounts = db.query(models.Account).all()
+        for account in accounts:
+            total_credits = db.query(func.sum(models.LedgerEntry.amount)).filter(
+                models.LedgerEntry.account_id == account.id,
+                models.LedgerEntry.entry_type == models.EntryType.CREDIT
+            ).scalar() or Decimal(0)
+
+            total_debits = db.query(func.sum(models.LedgerEntry.amount)).filter(
+                models.LedgerEntry.account_id == account.id,
+                models.LedgerEntry.entry_type == models.EntryType.DEBIT
+            ).scalar() or Decimal(0)
+
+            computed_balance = total_credits - total_debits
+
+            if computed_balance != account.balance:
+                print(f"RECONCILIATION ALERT: account {account.id} ({account.owner_name}) "
+                      f"stored={account.balance}, computed={computed_balance}")
+            else:
+                print(f"RECONCILIATION OK: account {account.id} ({account.owner_name}) "
+                      f"balance={account.balance}")
+    except Exception as e:
+        print(f"RECONCILIATION SKIPPED: {e}")
+    finally:
+        db.close()
+
+# start the scheduler when the app starts
+scheduler = BackgroundScheduler()
+scheduler.add_job(reconcile_all_accounts, "interval", minutes=1)# run every minute
+scheduler.start()
 
 # This function gives each request its own database session, and closes it when done
 def get_db():
@@ -153,7 +188,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.post("/deposit")
 @limiter.limit("2/minute")
-def deposit(request: Request, req: DepositRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def deposit(req: DepositRequest,request: Request,  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # idempotency check: has this exact request been processed before?
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
@@ -414,9 +449,20 @@ def create_account(account: AccountCreate, db: Session = Depends(get_db), curren
     db.refresh(new_account)
     return new_account
 
-
-
 @app.get("/test-rate-limit")
 @limiter.limit("2/minute")
 def test_rate_limit(request: Request):
     return {"message": "ok"}
+
+@app.post("/dev-setup")
+def dev_setup(db: Session = Depends(get_db)):
+    # create EXTERNAL account
+    external = models.Account(owner_name="EXTERNAL", currency="USD", balance=0)
+    db.add(external)
+    # create Alice
+    alice = models.Account(owner_name="Alice", currency="USD", balance=0)
+    db.add(alice)
+    db.commit()
+    db.refresh(external)
+    db.refresh(alice)
+    return {"external_id": external.id, "alice_id": alice.id}
