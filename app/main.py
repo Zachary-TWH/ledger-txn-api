@@ -14,6 +14,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler 
 from slowapi.middleware import SlowAPIMiddleware
+import logging
 
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
@@ -29,6 +30,11 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def reconcile_all_accounts():
     db = SessionLocal()
@@ -48,13 +54,11 @@ def reconcile_all_accounts():
             computed_balance = total_credits - total_debits
 
             if computed_balance != account.balance:
-                print(f"RECONCILIATION ALERT: account {account.id} ({account.owner_name}) "
+                logger.warning(f"RECONCILIATION ALERT: account {account.id} ({account.owner_name}) "
                       f"stored={account.balance}, computed={computed_balance}")
             else:
-                print(f"RECONCILIATION OK: account {account.id} ({account.owner_name}) "
+                logger.info(f"RECONCILIATION OK: account {account.id} ({account.owner_name}) "
                       f"balance={account.balance}")
-    except Exception as e:
-        print(f"RECONCILIATION SKIPPED: {e}")
     finally:
         db.close()
 
@@ -160,7 +164,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 @app.post("/register")
-def register(user: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def register(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     # check if username already exists
     existing = db.query(models.User).filter_by(username=user.username).first()
     if existing:
@@ -176,7 +181,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     return {"message": "User created successfully"}
 
 @app.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     # OAuth2PasswordRequestForm expects username + password as form fields
     user = db.query(models.User).filter_by(username=form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
@@ -187,8 +193,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/deposit")
-@limiter.limit("2/minute")
-def deposit(req: DepositRequest,request: Request,  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@limiter.limit("10/minute")
+def deposit(request: Request,  req: DepositRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # idempotency check: has this exact request been processed before?
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
@@ -232,7 +238,8 @@ def deposit(req: DepositRequest,request: Request,  db: Session = Depends(get_db)
     return {"transaction_id": txn.id, "new_balance": account.balance}
 
 @app.post("/withdraw")
-def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@limiter.limit("10/minute")
+def withdraw(request: Request, req: WithdrawalRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # req.idempotency_key = "wdr-001" (from JSON)
     # check if this exact request was already processed before
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
@@ -286,7 +293,8 @@ def withdraw(req: WithdrawalRequest, db: Session = Depends(get_db), current_user
     return {"transaction_id": txn.id, "new_balance": account.balance}
 
 @app.post("/transfer")
-def transfer(req: TransferRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@limiter.limit("10/minute")         
+def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # check if this exact transfer was already processed before
     # req.idempotency_key = "txn-001" (from JSON)
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
@@ -360,7 +368,8 @@ def transfer(req: TransferRequest, db: Session = Depends(get_db), current_user: 
     }
 
 @app.get("/accounts/{account_id}")
-def get_account(account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def get_account(request: Request, account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # account_id comes from the URL, not JSON body
     # e.g. GET /accounts/5 → account_id = 5
     account = db.query(models.Account).filter_by(id=account_id).first()
@@ -369,7 +378,8 @@ def get_account(account_id: int, db: Session = Depends(get_db), current_user: mo
     return account
 
 @app.get("/accounts/{account_id}/transactions")
-def get_transactions(account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20, current_user: models.User = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def get_transactions(request: Request, account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20, current_user: models.User = Depends(get_current_user)):
     # check account exists first
     account = db.query(models.Account).filter_by(id=account_id).first()
     if not account:
@@ -404,7 +414,8 @@ def get_transactions(account_id: int, db: Session = Depends(get_db), page : int 
     }
 
 @app.get("/accounts/{account_id}/integrity")
-def check_integrity(account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def check_integrity(request: Request, account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # fetch the account
     account = db.query(models.Account).filter_by(id=account_id).first()
     if not account:
@@ -438,7 +449,8 @@ def check_integrity(account_id: int, db: Session = Depends(get_db), current_user
     }
 
 @app.post("/accounts", response_model=AccountOut)
-def create_account(account: AccountCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def create_account(request: Request, account: AccountCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     new_account = models.Account(
         owner_name=account.owner_name,
         currency=account.currency,
@@ -449,11 +461,7 @@ def create_account(account: AccountCreate, db: Session = Depends(get_db), curren
     db.refresh(new_account)
     return new_account
 
-@app.get("/test-rate-limit")
-@limiter.limit("2/minute")
-def test_rate_limit(request: Request):
-    return {"message": "ok"}
-
+# This endpoint is for development/testing purposes only. It creates the EXTERNAL account and a test user "Alice".
 @app.post("/dev-setup")
 def dev_setup(db: Session = Depends(get_db)):
     # create EXTERNAL account
