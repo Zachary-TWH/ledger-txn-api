@@ -15,11 +15,12 @@ from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler 
 from slowapi.middleware import SlowAPIMiddleware
 import logging
-
+import secrets
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -66,6 +67,9 @@ def reconcile_all_accounts():
 scheduler = BackgroundScheduler()
 scheduler.add_job(reconcile_all_accounts, "interval", minutes=1)# run every minute
 scheduler.start()
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 # This function gives each request its own database session, and closes it when done
 def get_db():
@@ -133,6 +137,11 @@ class TransferRequest(BaseModel):
             raise ValueError("Amount must be greater than zero")
         return v
 
+def create_refresh_token() -> str:
+    # generates a random 64-character string — not a JWT, just a random token
+    # stored in DB so it can be blacklisted
+    return secrets.token_hex(64)
+
 def hash_password(password: str) -> str:
     # converts "mysecret" → "$2b$12$randomhashstring..."
     return pwd_context.hash(password[:72])
@@ -183,14 +192,29 @@ def register(request: Request, user: UserCreate, db: Session = Depends(get_db)):
 @app.post("/login")
 @limiter.limit("5/minute")
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    # OAuth2PasswordRequestForm expects username + password as form fields
     user = db.query(models.User).filter_by(username=form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # create and return a JWT token
-    token = create_access_token(data={"sub": user.username})
-    return {"access_token": token, "token_type": "bearer"}
+    # create access token (short lived)
+    access_token = create_access_token(data={"sub": user.username})
+
+    # create refresh token (long lived, stored in DB)
+    refresh_token = create_refresh_token()
+    expires_at = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    db_refresh_token = models.RefreshToken(
+        token=refresh_token,
+        user_id=user.id,
+        expires_at=expires_at
+    )
+    db.add(db_refresh_token)
+    db.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
 
 @app.post("/deposit")
 @limiter.limit("10/minute")
@@ -461,7 +485,32 @@ def create_account(request: Request, account: AccountCreate, db: Session = Depen
     db.refresh(new_account)
     return new_account
 
-# This endpoint is for development/testing purposes only. It creates the EXTERNAL account and a test user "Alice".
+@app.post("/refresh")
+@limiter.limit("10/minute")
+def refresh(request: Request, req: RefreshTokenRequest, db: Session = Depends(get_db)):
+    db_token = db.query(models.RefreshToken).filter_by(token=req.refresh_token).first()
+
+    if not db_token:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    if db_token.is_revoked:
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+    if db_token.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+
+    new_access_token = create_access_token(data={"sub": db_token.user.username})
+    return {"access_token": new_access_token, "token_type": "bearer"}
+
+@app.post("/logout")
+@limiter.limit("10/minute")
+def logout(request: Request, req: RefreshTokenRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    db_token = db.query(models.RefreshToken).filter_by(token=req.refresh_token, user_id=current_user.id).first()
+    if not db_token:
+        raise HTTPException(status_code=404, detail="Refresh token not found")
+
+    db_token.is_revoked = True
+    db.commit()
+    return {"message": "Logged out successfully"}
+
 @app.post("/dev-setup")
 def dev_setup(db: Session = Depends(get_db)):
     # create EXTERNAL account
