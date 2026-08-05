@@ -7,6 +7,8 @@ from app.database import Base
 from app.main import get_db
 import threading
 
+app.state.limiter.enabled = False  
+
 TEST_DATABASE_URL = "postgresql://postgres:mysecret@localhost:5432/ledger_test"
 
 engine = create_engine(TEST_DATABASE_URL)
