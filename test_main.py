@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -6,6 +8,9 @@ from app.main import app
 from app.database import Base
 from app.main import get_db
 import threading
+from sqlalchemy import text
+from alembic import command
+from alembic.config import Config
 
 app.state.limiter.enabled = False  
 
@@ -25,11 +30,23 @@ app.dependency_overrides[get_db] = override_get_db
 
 client = TestClient(app)
 
+def run_migrations_up():
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+        conn.commit()
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL 
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    command.upgrade(cfg, "head")
+
+def run_migrations_down():
+    pass  # schema gets dropped at the start of the next run instead
+
 @pytest.fixture(autouse=True)
 def setup_database():
-    Base.metadata.create_all(bind=engine)
+    run_migrations_up()
     yield
-    Base.metadata.drop_all(bind=engine)
 
 def get_auth_headers():
     client.post("/register", json={"username": "testuser", "password": "testpass123"})
