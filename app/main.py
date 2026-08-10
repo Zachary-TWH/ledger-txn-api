@@ -97,7 +97,7 @@ def fetch_exchange_rates():
 # start the scheduler when the app starts
 scheduler = BackgroundScheduler()
 scheduler.add_job(reconcile_all_accounts, "interval", minutes=1)
-scheduler.add_job(fetch_exchange_rates, "interval", hours=1)   # <-- new line
+scheduler.add_job(fetch_exchange_rates, "interval", hours=1)
 scheduler.start()
 
 class RefreshTokenRequest(BaseModel):
