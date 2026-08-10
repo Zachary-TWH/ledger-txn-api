@@ -28,7 +28,8 @@ class Transaction(Base):
     description = Column(String)
     created_at = Column(DateTime, server_default=func.now())
     notes = Column(String, nullable=True)
-    
+    exchange_rate_used = Column(Numeric(precision=18, scale=6), nullable=True)
+
     entries = relationship("LedgerEntry", back_populates="transaction")
 
 class LedgerEntry(Base):
@@ -62,3 +63,12 @@ class RefreshToken(Base):
     is_revoked = Column(Boolean, default=False, nullable=False)
 
     user = relationship("User")
+
+class ExchangeRate(Base):
+    __tablename__ = "exchange_rates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    base_currency = Column(String, nullable=False, index=True)
+    quote_currency = Column(String, nullable=False, index=True)
+    rate = Column(Numeric(precision=18, scale=6), nullable=False)
+    fetched_at = Column(DateTime, server_default=func.now(), nullable=False)

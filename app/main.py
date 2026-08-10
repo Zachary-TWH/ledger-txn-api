@@ -16,11 +16,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from slowapi.middleware import SlowAPIMiddleware
 import logging
 import secrets
+import requests
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_DAYS = 7
+SUPPORTED_CURRENCIES = ["USD", "EUR", "GBP", "SGD", "JPY"]
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -63,9 +65,39 @@ def reconcile_all_accounts():
     finally:
         db.close()
 
+def fetch_exchange_rates():
+    db = SessionLocal()
+    try:
+        for base in SUPPORTED_CURRENCIES:
+            try:
+                response = requests.get(
+                    f"https://api.frankfurter.app/latest?from={base}",
+                    timeout=5
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for quote, rate in data["rates"].items():
+                    if quote not in SUPPORTED_CURRENCIES:
+                        continue
+                    db_rate = models.ExchangeRate(
+                        base_currency=base,
+                        quote_currency=quote,
+                        rate=Decimal(str(rate))
+                    )
+                    db.add(db_rate)
+
+                db.commit()
+                logger.info(f"EXCHANGE RATE FETCH OK: base={base}")
+            except Exception as e:
+                logger.warning(f"EXCHANGE RATE FETCH FAILED: base={base}, error={e}")
+    finally:
+        db.close()
+
 # start the scheduler when the app starts
 scheduler = BackgroundScheduler()
-scheduler.add_job(reconcile_all_accounts, "interval", minutes=1)# run every minute
+scheduler.add_job(reconcile_all_accounts, "interval", minutes=1)
+scheduler.add_job(fetch_exchange_rates, "interval", hours=1)   # <-- new line
 scheduler.start()
 
 class RefreshTokenRequest(BaseModel):
@@ -320,73 +352,86 @@ def withdraw(request: Request, req: WithdrawalRequest, db: Session = Depends(get
 @limiter.limit("10/minute")         
 def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # check if this exact transfer was already processed before
-    # req.idempotency_key = "txn-001" (from JSON)
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
         raise HTTPException(status_code=409, detail="Duplicate request")
     
     # prevent transferring to yourself
-    # req.from_account_id = 5, req.to_account_id = 5 → reject
     if req.from_account_id == req.to_account_id:
         raise HTTPException(status_code=400, detail="Cannot transfer to the same account")
 
-
-    # always lock in consistent id order to prevent deadlocks and assign the locks to variables for clarity
+    # always lock in consistent id order to prevent deadlocks
     lock_first_id = min(req.from_account_id, req.to_account_id)
     lock_second_id = max(req.from_account_id, req.to_account_id)
     
-    # lock both rows in order — any other request touching these accounts must wait
     first = db.query(models.Account).filter_by(id=lock_first_id).with_for_update().first()
     second = db.query(models.Account).filter_by(id=lock_second_id).with_for_update().first()
 
     if not first or not second:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    # assign back to correct sender/receiver variables
     from_account = first if first.id == req.from_account_id else second
     to_account = second if second.id == req.to_account_id else first
-    
-    # prevent transferring between different currencies
-    # e.g. Alice is USD, Bob is SGD → reject
-    if from_account.currency != to_account.currency:
-        raise HTTPException(status_code=400, detail="Currency mismatch between accounts")
 
-    # does Alice have enough money to send?
-    # from_account.balance = 60 (from Postgres), req.amount = 20 (from JSON)
+    # does Alice have enough money to send? (checked in from_account's own currency, before conversion)
     if from_account.balance < req.amount:
         raise HTTPException(status_code=400, detail="Insufficient funds")
 
+    # same currency: no conversion needed
+    if from_account.currency == to_account.currency:
+        exchange_rate_used = None
+        credited_amount = req.amount
+    else:
+        # different currencies: look up the most recent rate we've stored
+        rate_row = (
+            db.query(models.ExchangeRate)
+            .filter_by(base_currency=from_account.currency, quote_currency=to_account.currency)
+            .order_by(models.ExchangeRate.fetched_at.desc())
+            .first()
+        )
+        if not rate_row:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No exchange rate available for {from_account.currency} -> {to_account.currency}"
+            )
+        exchange_rate_used = rate_row.rate
+        credited_amount = req.amount * exchange_rate_used
+
     # create one transaction record grouping both ledger entries together
-    txn = models.Transaction(idempotency_key=req.idempotency_key, description="Transfer")
+    txn = models.Transaction(
+        idempotency_key=req.idempotency_key,
+        description="Transfer",
+        exchange_rate_used=exchange_rate_used
+    )
     db.add(txn)
     db.flush()  # get txn.id without committing yet
 
-    # debit Alice (money leaving her account )
+    # debit Alice, in her own currency
     debit_entry = models.LedgerEntry(
         transaction_id=txn.id,
-        account_id=from_account.id,        # Alice = id 5
+        account_id=from_account.id,
         entry_type=models.EntryType.DEBIT,
-        amount=req.amount                  # 20
+        amount=req.amount
     )
-    # credit Bob (money arriving in his account)
+    # credit Bob, in his own currency (converted, if currencies differ)
     credit_entry = models.LedgerEntry(
         transaction_id=txn.id,
-        account_id=to_account.id,          # Bob = id 3
+        account_id=to_account.id,
         entry_type=models.EntryType.CREDIT,
-        amount=req.amount                  # 20
+        amount=credited_amount
     )
     db.add_all([debit_entry, credit_entry])
 
-    # update both balances: Alice 60 - 20 = 40, Bob whatever + 20
+    # update both balances, each in their own currency
     from_account.balance -= req.amount
-    to_account.balance += req.amount
+    to_account.balance += credited_amount
 
-    # commit everything together — all or nothing
     db.commit()
     db.refresh(from_account)
     db.refresh(to_account)
     return {
         "transaction_id": txn.id,
+        "exchange_rate_used": exchange_rate_used,
         "from_account_new_balance": from_account.balance,
         "to_account_new_balance": to_account.balance
     }

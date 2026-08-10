@@ -1,17 +1,20 @@
-# use official Python image as base
-FROM python:3.11-slim
+# Use an official Python runtime as a parent image
+FROM python:3.12-slim
 
-# set working directory inside the container
+# Set the working directory in the container
 WORKDIR /app
 
-# copy requirements first (so Docker caches this layer)
+# Copy the requirements file to the working directory
 COPY requirements.txt .
 
-# install dependencies
+# Install dependencies
 RUN pip install -r requirements.txt
 
-# copy the rest of the project
+# Copy the current directory contents into the container at /app
 COPY . .
 
-# start the FastAPI server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Make port 8000 available to the world outside this container
+EXPOSE 8000
+
+RUN chmod +x entrypoint.sh
+CMD ["./entrypoint.sh"]
