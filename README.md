@@ -14,6 +14,7 @@ Built this to learn backend engineering properly — every design decision was m
 - Currency mismatch protection — transfers between accounts in different currencies are rejected
 - Rate limiting on every endpoint to guard against abuse
 - Balance integrity check — recomputes balance from ledger entries and flags any discrepancy, both on demand (endpoint) and automatically (background job every minute)
+- Redis caching on account lookups to reduce database load, with a short TTL
 
 ## Stack
 
@@ -26,6 +27,7 @@ Built this to learn backend engineering properly — every design decision was m
 - APScheduler (background reconciliation job)
 - Docker + Docker Compose
 - pytest
+- Redis (caching)
 
 ## Running locally
 
@@ -35,6 +37,8 @@ docker compose exec api sh -c "alembic upgrade head"
 ```
 
 API available at `http://localhost:8000`.
+
+Redis starts automatically as part of `docker compose up` — no separate setup needed.
 
 ## Usage
 
@@ -105,3 +109,4 @@ Tests run against a separate `ledger_test` database and wipe themselves clean af
 
 - `SECRET_KEY` is hardcoded in `main.py` — fine for local dev, needs to move to an environment variable before this touches anything real.
 - `/dev-setup` is a convenience endpoint for quickly creating an EXTERNAL + test account locally — not meant to exist in a production build.
+- Account balance caching has a stale-read window: after a deposit/withdraw/transfer, `GET /accounts/{id}` can return the pre-update balance for up to 30 seconds (the cache TTL) if it was already cached. Cache invalidation on write isn't implemented yet.
