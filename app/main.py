@@ -14,9 +14,11 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler 
 from slowapi.middleware import SlowAPIMiddleware
+from .redis_client import redis_client
 import logging
 import secrets
 import requests
+from contextlib import asynccontextmanager
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
@@ -26,7 +28,12 @@ SUPPORTED_CURRENCIES = ["USD", "EUR", "GBP", "SGD", "JPY"]
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await redis_client.close()
+
+app = FastAPI(lifespan=lifespan)
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -435,14 +442,21 @@ def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_d
         "to_account_new_balance": to_account.balance
     }
 
-@app.get("/accounts/{account_id}")
+@app.get("/accounts/{account_id}", response_model=AccountOut)
 @limiter.limit("5/minute")
-def get_account(request: Request, account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # account_id comes from the URL, not JSON body
-    # e.g. GET /accounts/5 → account_id = 5
+async def get_account(request: Request, account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cache_key = f"account:{account_id}"
+    cached = await redis_client.get(cache_key)
+    if cached:
+        logger.info(f"CACHE HIT: account {account_id}")
+        return AccountOut.model_validate_json(cached)
+    
+    logger.info(f"CACHE MISS: account {account_id}")
     account = db.query(models.Account).filter_by(id=account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+
+    await redis_client.set(cache_key, AccountOut.model_validate(account).model_dump_json(), ex=30)
     return account
 
 @app.get("/accounts/{account_id}/transactions")

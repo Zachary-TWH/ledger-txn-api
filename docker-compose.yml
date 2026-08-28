@@ -16,15 +16,26 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   api:
     build: .
     ports:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/ledger
+      REDIS_HOST: redis
     depends_on:
       db:
         condition: service_healthy
 
+
+
 volumes:
   pgdata:
+
+
+

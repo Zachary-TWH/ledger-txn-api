@@ -15,6 +15,7 @@ COPY . .
 
 # Make port 8000 available to the world outside this container
 EXPOSE 8000
+ENV PYTHONUNBUFFERED=1
 
 RUN chmod +x entrypoint.sh
 CMD ["./entrypoint.sh"]
