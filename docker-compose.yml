@@ -21,6 +21,17 @@ services:
     ports:
       - "6379:6379"
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      
   api:
     build: .
     ports:
@@ -28,14 +39,24 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/ledger
       REDIS_HOST: redis
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
     depends_on:
       db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: celery -A app.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/ledger
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
 
 
 volumes:
   pgdata:
-
-
-
