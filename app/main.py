@@ -256,7 +256,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
 
 @app.post("/deposit")
 @limiter.limit("10/minute")
-def deposit(request: Request,  req: DepositRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def deposit(request: Request,  req: DepositRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # idempotency check: has this exact request been processed before?
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
@@ -296,12 +296,13 @@ def deposit(request: Request,  req: DepositRequest, db: Session = Depends(get_db
     account.balance += req.amount
 
     db.commit()
+    await redis_client.delete(f"account:{req.account_id}")
     db.refresh(account)
     return {"transaction_id": txn.id, "new_balance": account.balance}
 
 @app.post("/withdraw")
 @limiter.limit("10/minute")
-def withdraw(request: Request, req: WithdrawalRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def withdraw(request: Request, req: WithdrawalRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # req.idempotency_key = "wdr-001" (from JSON)
     # check if this exact request was already processed before
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
@@ -351,12 +352,13 @@ def withdraw(request: Request, req: WithdrawalRequest, db: Session = Depends(get
 
     # commit everything together atomically — all or nothing
     db.commit()
+    await redis_client.delete(f"account:{req.account_id}")
     db.refresh(account)
     return {"transaction_id": txn.id, "new_balance": account.balance}
 
 @app.post("/transfer")
 @limiter.limit("10/minute")         
-def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # check if this exact transfer was already processed before
     existing = db.query(models.Transaction).filter_by(idempotency_key=req.idempotency_key).first()
     if existing:
@@ -433,6 +435,8 @@ def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_d
     to_account.balance += credited_amount
 
     db.commit()
+    await redis_client.delete(f"account:{from_account.id}")
+    await redis_client.delete(f"account:{to_account.id}")
     db.refresh(from_account)
     db.refresh(to_account)
     return {
@@ -442,6 +446,7 @@ def transfer(request: Request, req: TransferRequest, db: Session = Depends(get_d
         "to_account_new_balance": to_account.balance
     }
 
+# fetch account details, with caching
 @app.get("/accounts/{account_id}", response_model=AccountOut)
 @limiter.limit("5/minute")
 async def get_account(request: Request, account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -459,6 +464,7 @@ async def get_account(request: Request, account_id: int, db: Session = Depends(g
     await redis_client.set(cache_key, AccountOut.model_validate(account).model_dump_json(), ex=30)
     return account
 
+# fetch all transactions for a given account, with pagination like statements
 @app.get("/accounts/{account_id}/transactions")
 @limiter.limit("5/minute")
 def get_transactions(request: Request, account_id: int, db: Session = Depends(get_db), page : int = 1, page_size: int = 20, current_user: models.User = Depends(get_current_user)):
@@ -495,6 +501,7 @@ def get_transactions(request: Request, account_id: int, db: Session = Depends(ge
         "results": result
     }
 
+# integrity check endpoint: recompute the balance from ledger entries and compare to stored balance
 @app.get("/accounts/{account_id}/integrity")
 @limiter.limit("5/minute")
 def check_integrity(request: Request, account_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -530,6 +537,7 @@ def check_integrity(request: Request, account_id: int, db: Session = Depends(get
         "is_valid": is_valid  # True = balances match, False = discrepancy detected
     }
 
+# create a new account for the current user
 @app.post("/accounts", response_model=AccountOut)
 @limiter.limit("5/minute")
 def create_account(request: Request, account: AccountCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
