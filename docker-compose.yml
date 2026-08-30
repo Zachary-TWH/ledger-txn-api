@@ -56,7 +56,14 @@ services:
       rabbitmq:
         condition: service_healthy
 
-
+  beat:                                         
+    build: .
+    command: celery -A app.celery_app beat --loglevel=info
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   pgdata:

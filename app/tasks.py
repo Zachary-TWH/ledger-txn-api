@@ -1,11 +1,12 @@
 # Background tasks run by Celery workers, separate from the API process
-
 from .celery_app import celery_app
 from .database import SessionLocal
 from . import models
 from sqlalchemy import func
 from decimal import Decimal
 import logging
+from decimal import Decimal
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -33,5 +34,39 @@ def reconcile_all_accounts_task():
             else:
                 logger.info(f"RECONCILIATION OK: account {account.id} ({account.owner_name}) "
                       f"balance={account.balance}")
+    finally:
+        db.close()
+
+
+SUPPORTED_CURRENCIES = ["USD", "EUR", "GBP", "SGD", "JPY"]
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
+def fetch_exchange_rates_task(self):
+    db = SessionLocal()
+    try:
+        for base in SUPPORTED_CURRENCIES:
+            try:
+                response = requests.get(
+                    f"https://api.frankfurter.app/latest?from={base}",
+                    timeout=5
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for quote, rate in data["rates"].items():
+                    if quote not in SUPPORTED_CURRENCIES:
+                        continue
+                    db_rate = models.ExchangeRate(
+                        base_currency=base,
+                        quote_currency=quote,
+                        rate=Decimal(str(rate))
+                    )
+                    db.add(db_rate)
+
+                db.commit()
+                logger.info(f"EXCHANGE RATE FETCH OK: base={base}")
+            except Exception as e:
+                logger.warning(f"EXCHANGE RATE FETCH FAILED: base={base}, error={e}")
+                raise self.retry(exc=e)
     finally:
         db.close()

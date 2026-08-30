@@ -12,12 +12,10 @@ from datetime import datetime, timedelta
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from apscheduler.schedulers.background import BackgroundScheduler 
 from slowapi.middleware import SlowAPIMiddleware
 from .redis_client import redis_client
 import logging
 import secrets
-import requests
 from contextlib import asynccontextmanager
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
@@ -44,66 +42,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-def reconcile_all_accounts():
-    db = SessionLocal()
-    try:
-        accounts = db.query(models.Account).all()
-        for account in accounts:
-            total_credits = db.query(func.sum(models.LedgerEntry.amount)).filter(
-                models.LedgerEntry.account_id == account.id,
-                models.LedgerEntry.entry_type == models.EntryType.CREDIT
-            ).scalar() or Decimal(0)
-
-            total_debits = db.query(func.sum(models.LedgerEntry.amount)).filter(
-                models.LedgerEntry.account_id == account.id,
-                models.LedgerEntry.entry_type == models.EntryType.DEBIT
-            ).scalar() or Decimal(0)
-
-            computed_balance = total_credits - total_debits
-
-            if computed_balance != account.balance:
-                logger.warning(f"RECONCILIATION ALERT: account {account.id} ({account.owner_name}) "
-                      f"stored={account.balance}, computed={computed_balance}")
-            else:
-                logger.info(f"RECONCILIATION OK: account {account.id} ({account.owner_name}) "
-                      f"balance={account.balance}")
-    finally:
-        db.close()
-
-def fetch_exchange_rates():
-    db = SessionLocal()
-    try:
-        for base in SUPPORTED_CURRENCIES:
-            try:
-                response = requests.get(
-                    f"https://api.frankfurter.app/latest?from={base}",
-                    timeout=5
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                for quote, rate in data["rates"].items():
-                    if quote not in SUPPORTED_CURRENCIES:
-                        continue
-                    db_rate = models.ExchangeRate(
-                        base_currency=base,
-                        quote_currency=quote,
-                        rate=Decimal(str(rate))
-                    )
-                    db.add(db_rate)
-
-                db.commit()
-                logger.info(f"EXCHANGE RATE FETCH OK: base={base}")
-            except Exception as e:
-                logger.warning(f"EXCHANGE RATE FETCH FAILED: base={base}, error={e}")
-    finally:
-        db.close()
-
-# start the scheduler when the app starts
-scheduler = BackgroundScheduler()
-scheduler.add_job(fetch_exchange_rates, "interval", hours=1)
-scheduler.start()
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
