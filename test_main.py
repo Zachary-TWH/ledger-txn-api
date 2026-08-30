@@ -33,6 +33,11 @@ app.dependency_overrides[get_db] = override_get_db
 
 client = TestClient(app)
 
+@pytest.fixture(scope="session", autouse=True)
+def _client_lifespan():
+    with client:
+        yield
+
 def run_migrations_up():
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
