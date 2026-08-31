@@ -1,4 +1,4 @@
-# double-entry-ledger
+# Double-entry-ledger
 
 A REST API for a double-entry bookkeeping ledger, built with FastAPI and PostgreSQL. Designed to mirror the kind of financial transaction system you'd find at a crypto exchange or fintech backend.
 
@@ -88,22 +88,6 @@ curl -X POST http://localhost:8000/refresh \
 | GET | /accounts/{id} | Get account balance |
 | GET | /accounts/{id}/transactions | Transaction history (paginated) |
 | GET | /accounts/{id}/integrity | Verify balance against ledger entries |
-
-## Design decisions worth noting
-
-**Why double-entry?** Every money movement creates two ledger entries, a debit on one account and a credit on another. The ledger entries are the source of truth, the stored balance is a cache that gets verified against them.
-
-**Why idempotency keys?** Network retries are a reality. A client that doesn't hear back from the server might retry a deposit. Without idempotency, that's a double deposit. The key is enforced unique at the database level, not the application level.
-
-**Why row level locking?** Two concurrent deposits hitting the same account would both read the same balance, add to it, and write back, so one deposit would be lost. `SELECT FOR UPDATE` serializes access to the row. Transfer locks both accounts in consistent ID order to prevent deadlocks.
-
-**Why refresh tokens?** Short lived access tokens limit the damage if one leaks, but forcing a re-login every 30 minutes is bad UX. The refresh token is a random string, not a JWT, stored in the database so it can be revoked on logout. A stateless JWT alone can't be invalidated before it expires.
-
-**Why a background reconciliation job?** The `/integrity` endpoint checks one account on demand, but nobody's going to call it constantly. A scheduled job sweeps every account each minute and logs a warning if computed balance ever drifts from stored balance, so a bug would surface in the logs instead of silently corrupting data.
-
-**Why a message queue instead of running background jobs inside the API?** Reconciliation and exchange rate fetching used to run on a timer inside the API process itself. That works fine until a job takes long enough to compete with actual API requests for CPU and memory. Moving them onto a queue means a separate worker process picks up the work. The API stays responsive no matter how long a job takes, and if a job fails it can retry without taking the API down with it.
-
-**Why Celery Beat instead of a simple timer?** Beat's only job is to publish a task to the queue on schedule. It never runs the task itself, the worker does. That separation means you can run several workers pulling from the same queue if you ever need more throughput, but you only ever run one Beat, so scheduled jobs never fire twice.
 
 ## Running tests
 
