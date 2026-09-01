@@ -1,8 +1,6 @@
 # Double-entry-ledger
 
-A REST API for a double-entry bookkeeping ledger, built with FastAPI and PostgreSQL. Designed to mirror the kind of financial transaction system you'd find at a crypto exchange or fintech backend.
-
-Built this to learn backend engineering properly. Every design decision was made deliberately.
+A REST API for a double-entry bookkeeping ledger, built with FastAPI and PostgreSQL. Designed to mirror the kind of financial transaction system you'd find at a crypto exchange or fintech backend. Built this to learn backend engineering properly.
 
 ## What it does
 
