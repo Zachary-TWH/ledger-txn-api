@@ -15,6 +15,7 @@ spec:
       containers:
         - name: api
           image: ghcr.io/zachary-twh/ledger-txn-api:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
