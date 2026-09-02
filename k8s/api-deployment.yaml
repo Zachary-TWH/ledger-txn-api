@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/zachary-twh/ledger-txn-api:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://postgres:localtest@postgres:5432/ledger"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: RABBITMQ_URL
+              value: "amqp://guest:guest@rabbitmq:5672//"

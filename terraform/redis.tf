@@ -8,6 +8,6 @@ resource "docker_container" "ledger_redis" {
 
   ports {
     internal = 6379
-    external = 6380  # different port than your compose redis, to avoid clashing
+    external = 6380  
   }
 }

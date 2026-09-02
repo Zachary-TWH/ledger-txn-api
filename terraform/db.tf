@@ -1,5 +1,5 @@
 resource "docker_image" "postgres" {
-  name = "postgres:16"
+  name = "postgres:15"
 }
 
 resource "docker_container" "ledger_db" {
