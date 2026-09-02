@@ -1,19 +1,64 @@
-resource "docker_image" "postgres" {
-  name = "postgres:15"
+resource "kubernetes_deployment" "postgres" {
+  metadata {
+    name = "postgres"
+  }
+
+  spec {
+    replicas = 1
+
+    selector {
+      match_labels = {
+        app = "postgres"
+      }
+    }
+
+    template {
+      metadata {
+        labels = {
+          app = "postgres"
+        }
+      }
+
+      spec {
+        container {
+          name  = "postgres"
+          image = "postgres:16"
+
+          env {
+            name  = "POSTGRES_USER"
+            value = "postgres"
+          }
+          env {
+            name  = "POSTGRES_PASSWORD"
+            value = "localtest"
+          }
+          env {
+            name  = "POSTGRES_DB"
+            value = "ledger"
+          }
+
+          port {
+            container_port = 5432
+          }
+        }
+      }
+    }
+  }
 }
 
-resource "docker_container" "ledger_db" {
-  name  = "ledger-db-tf"
-  image = docker_image.postgres.image_id
+resource "kubernetes_service" "postgres" {
+  metadata {
+    name = "postgres"
+  }
 
-  env = [
-    "POSTGRES_USER=postgres",
-    "POSTGRES_PASSWORD=localtest",
-    "POSTGRES_DB=ledger"
-  ]
+  spec {
+    selector = {
+      app = "postgres"
+    }
 
-  ports {
-    internal = 5432
-    external = 5433  # different port than your compose db, to avoid clashing
+    port {
+      port        = 5432
+      target_port = 5432
+    }
   }
 }

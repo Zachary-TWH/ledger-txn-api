@@ -1,18 +1,60 @@
-resource "docker_image" "rabbitmq" {
-  name = "rabbitmq:3-management"
-}
-
-resource "docker_container" "ledger_rabbitmq" {
-  name  = "ledger-rabbitmq-tf"
-  image = docker_image.rabbitmq.image_id
-
-  ports {
-    internal = 5672
-    external = 5673  # different from your compose rabbitmq, to avoid clashing
+resource "kubernetes_deployment" "rabbitmq" {
+  metadata {
+    name = "rabbitmq"
   }
 
-  ports {
-    internal = 15672
-    external = 15673  # management UI, also offset to avoid clashing
+  spec {
+    replicas = 1
+
+    selector {
+      match_labels = {
+        app = "rabbitmq"
+      }
+    }
+
+    template {
+      metadata {
+        labels = {
+          app = "rabbitmq"
+        }
+      }
+
+      spec {
+        container {
+          name  = "rabbitmq"
+          image = "rabbitmq:3-management"
+
+          port {
+            container_port = 5672
+          }
+          port {
+            container_port = 15672
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "rabbitmq" {
+  metadata {
+    name = "rabbitmq"
+  }
+
+  spec {
+    selector = {
+      app = "rabbitmq"
+    }
+
+    port {
+      name        = "amqp"
+      port        = 5672
+      target_port = 5672
+    }
+    port {
+      name        = "management"
+      port        = 15672
+      target_port = 15672
+    }
   }
 }
