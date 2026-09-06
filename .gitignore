@@ -8,3 +8,4 @@ linux.txt
 terraform.tfstate
 terraform.tfstate.backup
 *.tfstate.lock.info
+docker-compose.yml
