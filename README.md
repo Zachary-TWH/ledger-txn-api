@@ -11,10 +11,11 @@ A REST API for a double-entry bookkeeping ledger, built with FastAPI and Postgre
 - Row-level locking on balance updates to prevent race conditions under concurrent load
 - Currency mismatch protection, transfers between accounts in different currencies are rejected
 - Rate limiting on every endpoint to guard against abuse
-- Balance integrity check, recomputes balance from ledger entries and flags any discrepancy, both on demand (endpoint) and automatically (background job every minute)
+- Balance integrity check, recomputes balance from ledger entries and flags any discrepancy, both on demand (endpoint) and automatically via a scheduled Celery Beat job (every minute)
 - Redis caching on account lookups to reduce database load, with cache invalidation on writes so balances never go stale after a deposit, withdrawal, or transfer
 - Background jobs (reconciliation and exchange rate fetching) run on a message queue instead of inside the API process, so they don't compete with API requests for resources and can be scaled independently
-- Reconciliation and exchange rate fetching run on a schedule automatically, with retry logic on the exchange rate fetch in case the external API call fails
+- Reconciliation and exchange rate fetching run on a schedule automatically via Celery Beat, with retry logic on the exchange rate fetch in case the external API call fails
+- Deployed on Kubernetes (Minikube) via Terraform, with two layers of load balancing: a Kubernetes Service distributing traffic across API pod replicas, and an NGINX Ingress controller as the external entry point
 
 ## Stack
 
@@ -28,29 +29,47 @@ A REST API for a double-entry bookkeeping ledger, built with FastAPI and Postgre
 - RabbitMQ (message queue)
 - Celery (background workers)
 - Celery Beat (job scheduling)
-- Docker and Docker Compose
+- Kubernetes (Minikube)
+- Terraform (`hashicorp/kubernetes` provider)
+- Docker (container images, built and pushed via GitHub Actions to GHCR)
 - pytest
 
 ## Running locally
 
+Requires Minikube and Terraform installed.
+
 ```bash
-docker compose up --build -d
-docker compose exec api sh -c "alembic upgrade head"
+minikube start
+cd terraform
+terraform init
+terraform apply
 ```
 
-API available at `http://localhost:8000`.
+This provisions all services (`postgres`, `redis`, `rabbitmq`, `api`, `worker`, `beat`) as Kubernetes Deployments, plus an Ingress for external access.
 
-Redis, RabbitMQ, the Celery worker, and the Celery beat scheduler all start automatically as part of `docker compose up`. No separate setup needed.
+Enable the Ingress controller (one-time):
+```bash
+minikube addons enable ingress
+```
+
+Expose the Ingress locally:
+```bash
+minikube tunnel
+```
+
+API available at `http://127.0.0.1/docs`.
+
+Database migrations run automatically on API pod startup via Alembic.
 
 ## Usage
 
 Register and login to get a token pair:
 ```bash
-curl -X POST http://localhost:8000/register \
+curl -X POST http://127.0.0.1/register \
   -H "Content-Type: application/json" \
   -d '{"username": "alice", "password": "secret123"}'
 
-curl -X POST http://localhost:8000/login \
+curl -X POST http://127.0.0.1/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "username=alice&password=secret123"
 ```
@@ -58,7 +77,7 @@ Login returns an `access_token` (30 min expiry) and a `refresh_token` (7 day exp
 
 Include the access token in subsequent requests:
 ```bash
-curl -X POST http://localhost:8000/accounts \
+curl -X POST http://127.0.0.1/accounts \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"owner_name": "Alice", "currency": "USD"}'
@@ -66,7 +85,7 @@ curl -X POST http://localhost:8000/accounts \
 
 When the access token expires, use the refresh token to get a new one without logging in again:
 ```bash
-curl -X POST http://localhost:8000/refresh \
+curl -X POST http://127.0.0.1/refresh \
   -H "Content-Type: application/json" \
   -d '{"refresh_token": "<refresh_token>"}'
 ```
