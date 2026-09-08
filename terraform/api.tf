@@ -28,7 +28,17 @@ resource "kubernetes_deployment" "api" {
           port {
             container_port = 8000
           }
-
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "128Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "256Mi"
+            }
+          }
+                  
           env {
             name  = "DATABASE_URL"
             value = "postgresql://postgres:localtest@postgres:5432/ledger"
