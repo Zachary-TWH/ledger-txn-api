@@ -16,6 +16,7 @@ A REST API for a double-entry bookkeeping ledger, built with FastAPI and Postgre
 - Background jobs (reconciliation and exchange rate fetching) run on a message queue instead of inside the API process, so they don't compete with API requests for resources and can be scaled independently
 - Reconciliation and exchange rate fetching run on a schedule automatically via Celery Beat, with retry logic on the exchange rate fetch in case the external API call fails
 - Deployed on Kubernetes (Minikube) via Terraform, with two layers of load balancing: a Kubernetes Service distributing traffic across API pod replicas, and an NGINX Ingress controller as the external entry point
+- Horizontal Pod Autoscaler (HPA) automatically scales API pod replicas (1-5) based on CPU utilization
 
 ## Stack
 
