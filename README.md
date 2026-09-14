@@ -62,7 +62,7 @@ API available at `http://127.0.0.1/docs`.
 
 Database migrations run automatically on API pod startup via Alembic.
 
-## Usage
+## Usage 
 
 Register and login to get a token pair:
 ```bash
@@ -117,5 +117,5 @@ Tests run against a separate `ledger_test` database and wipe themselves clean af
 
 ## Known limitations
 
-- `SECRET_KEY` is hardcoded in `main.py`. Fine for local dev, needs to move to an environment variable before this touches anything real.
+- `SECRET_KEY` is hardcoded in `main.py` for local dev, needs to move to an environment variable before this touches anything real.
 - `/dev-setup` is a convenience endpoint for quickly creating an EXTERNAL and test account locally. Not meant to exist in a production build.
