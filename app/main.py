@@ -17,6 +17,7 @@ from .redis_client import redis_client
 import logging
 import secrets
 from contextlib import asynccontextmanager
+from prometheus_fastapi_instrumentator import Instrumentator
 
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
@@ -32,6 +33,8 @@ async def lifespan(app: FastAPI):
     await redis_client.close()
 
 app = FastAPI(lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)
+
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
