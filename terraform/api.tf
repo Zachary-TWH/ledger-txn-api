@@ -60,6 +60,9 @@ resource "kubernetes_deployment" "api" {
 resource "kubernetes_service" "api" {
   metadata {
     name = "api"
+    labels = {
+      app = "api"
+    }
   }
 
   spec {
@@ -70,6 +73,7 @@ resource "kubernetes_service" "api" {
     }
 
     port {
+      name        = "http"
       port        = 8000
       target_port = 8000
     }
