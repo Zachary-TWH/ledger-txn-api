@@ -15,8 +15,7 @@ A REST API for a double-entry bookkeeping ledger, built with FastAPI and Postgre
 - Redis caching on account lookups to reduce database load, with cache invalidation on writes so balances never go stale after a deposit, withdrawal, or transfer
 - Background jobs (reconciliation and exchange rate fetching) run on a message queue instead of inside the API process, so they don't compete with API requests for resources and can be scaled independently
 - Reconciliation and exchange rate fetching run on a schedule automatically via Celery Beat, with retry logic on the exchange rate fetch in case the external API call fails
-- Deployed on Kubernetes (Minikube) via Terraform, with two layers of load balancing: a Kubernetes Service distributing traffic across API pod replicas, and an NGINX Ingress controller as the external entry point
-- Horizontal Pod Autoscaler (HPA) automatically scales API pod replicas (1-5) based on CPU utilization
+
 
 ## Stack
 
@@ -32,8 +31,17 @@ A REST API for a double-entry bookkeeping ledger, built with FastAPI and Postgre
 - Celery Beat (job scheduling)
 - Kubernetes (Minikube)
 - Terraform (`hashicorp/kubernetes` provider)
+- Prometheus + Grafana
 - Docker (container images, built and pushed via GitHub Actions to GHCR)
 - pytest
+
+## Infrastructure
+
+- Kubernetes (Minikube), provisioned via Terraform using the `hashicorp/kubernetes` provider — all 6 services (`postgres`, `redis`, `rabbitmq`, `api`, `worker`, `beat`) run as Deployments, replacing Docker Compose
+- Load balancing at two layers: Kubernetes Service load-balances across `api` replicas internally, Ingress (NGINX) handles external entry point
+- Horizontal Pod Autoscaler on `api`, scales replicas based on CPU utilization
+- Prometheus + Grafana (via Helm `kube-prometheus-stack`) for observability — FastAPI instrumented with `prometheus-fastapi-instrumentator`, exposing per-endpoint request rate, error rate, and latency percentiles (p50/p99), scraped via a Terraform-managed ServiceMonitor
+- GitHub Actions CI/CD, builds and pushes to GHCR on every push, dual-tagged `:latest` and `:<git-sha>`
 
 ## Running locally
 
